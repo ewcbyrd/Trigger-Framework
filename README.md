@@ -1278,7 +1278,7 @@ Copy these folders to your org's `force-app/main/default/` directory:
 
 Deploy using Salesforce CLI:
 ```bash
-sf project deploy start --source-dir force-app/main/default
+sf project deploy start --source-dir Trigger-Framework
 ```
 
 ### Step 2: Create Triggers
