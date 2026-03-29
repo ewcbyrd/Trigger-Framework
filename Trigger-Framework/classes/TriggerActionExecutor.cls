@@ -7,7 +7,9 @@ public class TriggerActionExecutor {
     private static final String CONTEXT_SEPARATOR = '_';
     
     // Cache to store all metadata records, loaded once per transaction
+    @TestVisible
     private static Map<String, List<Trigger_Action__mdt>> actionCache;
+    @TestVisible
     private static Boolean cacheLoaded = false;
 
     /**
@@ -80,7 +82,54 @@ public class TriggerActionExecutor {
             actionCache.get(cacheKey).add(action);
         }
         
+        // Sort each group by Order__c ascending, nulls last
+        for (List<Trigger_Action__mdt> actionGroup : actionCache.values()) {
+            sortByOrder(actionGroup);
+        }
+
         cacheLoaded = true;
+    }
+
+    /**
+     * Sorts a list of Trigger_Action__mdt records by Order__c ascending with nulls last.
+     * Uses a simple insertion sort since action lists are typically small.
+     */
+    @TestVisible
+    private static void sortByOrder(List<Trigger_Action__mdt> actions) {
+        for (Integer i = 1; i < actions.size(); i++) {
+            Trigger_Action__mdt current = actions[i];
+            Decimal currentOrder = current.Order__c;
+            Integer j = i - 1;
+
+            while (j >= 0 && compareOrder(actions[j].Order__c, currentOrder) > 0) {
+                actions[j + 1] = actions[j];
+                j--;
+            }
+            actions[j + 1] = current;
+        }
+    }
+
+    /**
+     * Compares two Order__c values. Nulls are treated as greater than any number (nulls last).
+     * Returns negative if a < b, zero if equal, positive if a > b.
+     */
+    private static Integer compareOrder(Decimal a, Decimal b) {
+        if (a == null && b == null) {
+            return 0;
+        }
+        if (a == null) {
+            return 1;
+        }
+        if (b == null) {
+            return -1;
+        }
+        if (a < b) {
+            return -1;
+        }
+        if (a > b) {
+            return 1;
+        }
+        return 0;
     }
     
     /**
