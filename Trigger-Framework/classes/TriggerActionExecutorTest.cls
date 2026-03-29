@@ -293,4 +293,37 @@ private class TriggerActionExecutorTest {
 
         // If Custom Metadata with class not implementing interface exists, exception should be thrown
     }
+
+    @IsTest
+    static void shouldExecuteActionsInOrderByOrderField() {
+        // Arrange - Clear cache and execution log for clean state
+        TriggerActionExecutor.clearCache();
+        TestOrderActionFirst.executionLog.clear();
+
+        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test Order');
+        List<Account> newList = new List<Account>{ testAccount };
+        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
+
+        TriggerContext ctx = new TriggerContext(
+            System.TriggerOperation.BEFORE_UPDATE,
+            newList,
+            newMap,
+            newList,
+            newMap
+        );
+
+        // Act - Execute actions registered for Account BEFORE_UPDATE
+        // TestOrderActionSecond has Order__c = 5, TestOrderActionFirst has Order__c = 50
+        Test.startTest();
+        TriggerActionExecutor.execute(ctx, 'Account');
+        Test.stopTest();
+
+        // Assert - Second (Order 5) should execute before First (Order 50)
+        System.assertEquals(2, TestOrderActionFirst.executionLog.size(),
+            'Both order test actions should have executed');
+        System.assertEquals('Second', TestOrderActionFirst.executionLog[0],
+            'Action with lower Order__c (5) should execute first');
+        System.assertEquals('First', TestOrderActionFirst.executionLog[1],
+            'Action with higher Order__c (50) should execute second');
+    }
 }
