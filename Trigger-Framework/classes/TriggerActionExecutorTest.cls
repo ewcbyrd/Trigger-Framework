@@ -1,352 +1,279 @@
 /**
  * Tests for TriggerActionExecutor class.
+ * All tests inject metadata records directly into the static cache via
+ * @TestVisible fields, eliminating any dependency on deployed Custom Metadata
+ * records that could impact production trigger execution.
  */
 @IsTest
 private class TriggerActionExecutorTest {
 
-    @IsTest
-    static void shouldThrowExceptionWhenClassNotFound() {
-        // Arrange - Create a Custom Metadata record pointing to non-existent class
-        // Note: We can't directly create Custom Metadata in tests, so we'll test the createAction method directly
-        // through reflection by making it public temporarily, or we test via integration test with actual metadata
-        
-        // This test demonstrates the pattern - in reality you'd create actual Custom Metadata records
-        // and test the full execute() flow
-        
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test');
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
-
-        TriggerContext ctx = new TriggerContext(
-            System.TriggerOperation.BEFORE_INSERT,
-            newList,
-            newMap,
-            null,
-            null
+    // ─── Helper: builds a Trigger_Action__mdt record in memory ───
+    private static Trigger_Action__mdt buildAction(
+        String className, String sObjectName, String context, Decimal orderVal,
+        Boolean isActive, Decimal maxRecursion
+    ) {
+        return new Trigger_Action__mdt(
+            Label            = className,
+            DeveloperName    = className,
+            Class_Name__c    = className,
+            SObject__c       = sObjectName,
+            Context__c       = context,
+            Order__c         = orderVal,
+            Active__c        = isActive,
+            Max_Recursion__c = maxRecursion
         );
-
-        // Act & Assert
-        // Note: This test requires Custom Metadata records to be set up
-        // Since we can't create those in tests, we validate the logic works when records exist
-        Test.startTest();
-        TriggerActionExecutor.execute(ctx, 'Account');
-        Test.stopTest();
-        
-        // In a real org with Custom Metadata records, the framework would execute registered actions
-        System.assert(true, 'Execution completed without Custom Metadata records');
     }
 
-    @IsTest
-    static void shouldResolveContextNames() {
-        // Arrange
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test');
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
-
-        // Act & Assert - Test all trigger contexts
-        Test.startTest();
-        
-        TriggerContext beforeInsert = new TriggerContext(
-            System.TriggerOperation.BEFORE_INSERT,
-            newList,
-            newMap,
-            null,
-            null
-        );
-        TriggerActionExecutor.execute(beforeInsert, 'Account');
-
-        TriggerContext beforeUpdate = new TriggerContext(
-            System.TriggerOperation.BEFORE_UPDATE,
-            newList,
-            newMap,
-            newList,
-            newMap
-        );
-        TriggerActionExecutor.execute(beforeUpdate, 'Account');
-
-        TriggerContext beforeDelete = new TriggerContext(
-            System.TriggerOperation.BEFORE_DELETE,
-            null,
-            null,
-            newList,
-            newMap
-        );
-        TriggerActionExecutor.execute(beforeDelete, 'Account');
-
-        TriggerContext afterInsert = new TriggerContext(
-            System.TriggerOperation.AFTER_INSERT,
-            newList,
-            newMap,
-            null,
-            null
-        );
-        TriggerActionExecutor.execute(afterInsert, 'Account');
-
-        // AFTER_UPDATE context may have Custom Metadata with invalid class name
-        // Handle exception if it exists
-        TriggerContext afterUpdate = new TriggerContext(
-            System.TriggerOperation.AFTER_UPDATE,
-            newList,
-            newMap,
-            newList,
-            newMap
-        );
-        try {
-            TriggerActionExecutor.execute(afterUpdate, 'Account');
-        } catch (TriggerFrameworkException e) {
-            // Expected if TestInvalidClassName Custom Metadata exists with AFTER_UPDATE
-            System.assert(e.getMessage().contains('not found'), 
-                'Exception should be for class not found');
-        }
-
-        // AFTER_DELETE context may have Custom Metadata with class not implementing interface
-        // Handle exception if it exists
-        TriggerContext afterDelete = new TriggerContext(
-            System.TriggerOperation.AFTER_DELETE,
-            null,
-            null,
-            newList,
-            newMap
-        );
-        try {
-            TriggerActionExecutor.execute(afterDelete, 'Account');
-        } catch (TriggerFrameworkException e) {
-            // Expected if TestInvalidInterface Custom Metadata exists with AFTER_DELETE
-            System.assert(e.getMessage().contains('does not implement ITriggerAction'), 
-                'Exception should be for interface not implemented');
-        }
-
-        TriggerContext afterUndelete = new TriggerContext(
-            System.TriggerOperation.AFTER_UNDELETE,
-            newList,
-            newMap,
-            null,
-            null
-        );
-        TriggerActionExecutor.execute(afterUndelete, 'Account');
-
-        Test.stopTest();
-
-        // All contexts should execute without error (or expected exceptions for AFTER_UPDATE and AFTER_DELETE)
-        System.assert(true, 'All trigger contexts executed successfully');
-    }
-
-    @IsTest
-    static void shouldExecuteAsyncActions() {
-        // Arrange - Test async action execution with deployed Custom Metadata
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test Async');
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
-
-        TriggerContext ctx = new TriggerContext(
-            System.TriggerOperation.BEFORE_INSERT,
-            newList,
-            newMap,
-            null,
-            null
-        );
-
-        // Act - Execute with Custom Metadata pointing to TestAsyncAction
-        Test.startTest();
-        TriggerActionExecutor.execute(ctx, 'Account');
-        Test.stopTest();
-
-        // Assert - If TestAsyncAction Custom Metadata exists, async job would be enqueued
-        // The actual async execution is tested by the presence of the Custom Metadata record
-        System.assert(true, 'Async action execution completed');
-    }
-
-    @IsTest
-    static void shouldHandleRecursionLimit() {
-        // Arrange - Test recursion limit with deployed Custom Metadata (TestRecursionAction with Max_Recursion__c = 1)
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test Recursion');
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
-
-        TriggerContext ctx = new TriggerContext(
-            System.TriggerOperation.BEFORE_INSERT,
-            newList,
-            newMap,
-            null,
-            null
-        );
-
-        // Act - Execute multiple times to test recursion guard
-        Test.startTest();
-        TriggerRecursionGuard.reset(); // Reset for clean state
-        TestRecursionAction.executionCount = 0;
-        
-        TriggerActionExecutor.execute(ctx, 'Account'); // First execution - should run
-        TriggerActionExecutor.execute(ctx, 'Account'); // Second execution - should be blocked by recursion guard
-        
-        Test.stopTest();
-
-        // Assert - If TestRecursionAction Custom Metadata exists with Max_Recursion__c = 1,
-        // the action should only execute once
-        // Note: executionCount will only be set if the Custom Metadata record exists in the org
-        if (TestRecursionAction.executionCount > 0) {
-            System.assertEquals(1, TestRecursionAction.executionCount, 
-                'Action should only execute once when Max_Recursion__c = 1');
-        }
-    }
-
-    @IsTest
-    static void shouldLoadCacheWithInactiveRecords() {
-        // Arrange - Clear cache to force reload
+    // ─── Helper: injects a list of actions into the cache, keyed properly ───
+    private static void injectCache(List<Trigger_Action__mdt> actions) {
         TriggerActionExecutor.clearCache();
-        
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test');
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
+        TriggerActionExecutor.actionCache = new Map<String, List<Trigger_Action__mdt>>();
 
-        TriggerContext ctx = new TriggerContext(
-            System.TriggerOperation.BEFORE_INSERT,
-            newList,
-            newMap,
-            null,
-            null
-        );
-
-        // Act - Execute to trigger cache loading (will filter out inactive records)
-        Test.startTest();
-        TriggerActionExecutor.execute(ctx, 'Account');
-        Test.stopTest();
-
-        // Assert - Cache should be loaded and inactive records filtered out
-        // If TestInactiveAction Custom Metadata exists with Active__c = false, it should not execute
-        System.assert(true, 'Cache loaded successfully with inactive records filtered');
+        for (Trigger_Action__mdt a : actions) {
+            String key = a.SObject__c + '_' + a.Context__c;
+            if (!TriggerActionExecutor.actionCache.containsKey(key)) {
+                TriggerActionExecutor.actionCache.put(key, new List<Trigger_Action__mdt>());
+            }
+            TriggerActionExecutor.actionCache.get(key).add(a);
+        }
+        TriggerActionExecutor.cacheLoaded = true;
     }
 
+    // ─── Helper: injects a single action into the cache ───
+    private static void injectCache(Trigger_Action__mdt action) {
+        injectCache(new List<Trigger_Action__mdt>{ action });
+    }
+
+    // ─── Helper: builds a TriggerContext for Account ───
+    private static TriggerContext buildAccountContext(System.TriggerOperation op) {
+        Account testAccount = new Account(
+            Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test'
+        );
+        List<Account> records = new List<Account>{ testAccount };
+        Map<Id, Account> recordMap = new Map<Id, Account>{ testAccount.Id => testAccount };
+
+        Boolean isDelete = (op == System.TriggerOperation.BEFORE_DELETE ||
+                            op == System.TriggerOperation.AFTER_DELETE);
+        Boolean isInsertOrUndelete = (op == System.TriggerOperation.BEFORE_INSERT ||
+                                      op == System.TriggerOperation.AFTER_INSERT ||
+                                      op == System.TriggerOperation.AFTER_UNDELETE);
+
+        return new TriggerContext(
+            op,
+            isDelete ? null : records,
+            isDelete ? null : recordMap,
+            isInsertOrUndelete ? null : records,
+            isInsertOrUndelete ? null : recordMap
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // Tests
+    // ══════════════════════════════════════════════════════════════
+
     @IsTest
-    static void shouldGetActionsFromCache() {
-        // Arrange - Clear cache first
+    static void shouldResolveAllContextNames() {
+        // Arrange — inject an empty cache so no actions fire, just prove
+        // that every TriggerOperation resolves without error.
         TriggerActionExecutor.clearCache();
-        
-        // Act - Call getActions to load cache
+        TriggerActionExecutor.actionCache = new Map<String, List<Trigger_Action__mdt>>();
+        TriggerActionExecutor.cacheLoaded = true;
+
         Test.startTest();
-        List<Trigger_Action__mdt> actions = TriggerActionExecutor.getActions('Account', 'BEFORE_INSERT');
+        for (System.TriggerOperation op : System.TriggerOperation.values()) {
+            TriggerContext ctx = buildAccountContext(op);
+            TriggerActionExecutor.execute(ctx, 'Account');
+        }
         Test.stopTest();
 
-        // Assert - Should return actions (or empty list if no Custom Metadata exists)
-        System.assertNotEquals(null, actions, 'getActions should never return null');
+        System.assert(true, 'All trigger contexts resolved without error');
     }
 
     @IsTest
     static void shouldThrowExceptionForNonExistentClass() {
-        // Arrange - This test requires Custom Metadata record pointing to a non-existent class
-        // The TestInvalidClassName Custom Metadata points to 'NonExistentClass' with AFTER_UPDATE context
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test');
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
-
-        TriggerContext ctx = new TriggerContext(
-            System.TriggerOperation.AFTER_UPDATE,
-            newList,
-            newMap,
-            newList,
-            newMap
+        // Arrange — inject a record that points to a class that does not exist
+        Trigger_Action__mdt bad = buildAction(
+            'NonExistentClass', 'Account', 'AFTER_UPDATE', 10, true, null
         );
+        injectCache(bad);
 
-        // Act & Assert - Should throw TriggerFrameworkException when trying to instantiate non-existent class
+        TriggerContext ctx = buildAccountContext(System.TriggerOperation.AFTER_UPDATE);
+
+        // Act & Assert
         Test.startTest();
         Boolean exceptionThrown = false;
         try {
             TriggerActionExecutor.execute(ctx, 'Account');
         } catch (TriggerFrameworkException e) {
             exceptionThrown = true;
-            System.assert(e.getMessage().contains('not found'), 
+            System.assert(e.getMessage().contains('not found'),
                 'Exception message should indicate class not found: ' + e.getMessage());
         }
         Test.stopTest();
 
-        // If Custom Metadata with invalid class name exists, exception should be thrown
-        // If it doesn't exist, the test will pass without entering the catch block
+        System.assert(exceptionThrown, 'Expected TriggerFrameworkException for non-existent class');
     }
 
     @IsTest
     static void shouldThrowExceptionForInvalidInterface() {
-        // Arrange - This test requires Custom Metadata record pointing to a class that doesn't implement ITriggerAction
-        // The TestInvalidInterface Custom Metadata points to 'TestInvalidInterfaceClass' with AFTER_DELETE context
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test');
-        List<Account> oldList = new List<Account>{ testAccount };
-        Map<Id, Account> oldMap = new Map<Id, Account>{ testAccount.Id => testAccount };
-
-        TriggerContext ctx = new TriggerContext(
-            System.TriggerOperation.AFTER_DELETE,
-            null,
-            null,
-            oldList,
-            oldMap
+        // Arrange — inject a record pointing to a class that does NOT implement ITriggerAction
+        Trigger_Action__mdt bad = buildAction(
+            'TestInvalidInterfaceClass', 'Account', 'AFTER_DELETE', 10, true, null
         );
+        injectCache(bad);
 
-        // Act & Assert - Should throw TriggerFrameworkException when class doesn't implement ITriggerAction
+        TriggerContext ctx = buildAccountContext(System.TriggerOperation.AFTER_DELETE);
+
+        // Act & Assert
         Test.startTest();
         Boolean exceptionThrown = false;
         try {
             TriggerActionExecutor.execute(ctx, 'Account');
         } catch (TriggerFrameworkException e) {
             exceptionThrown = true;
-            System.assert(e.getMessage().contains('does not implement ITriggerAction'), 
+            System.assert(e.getMessage().contains('does not implement ITriggerAction'),
                 'Exception message should indicate interface not implemented: ' + e.getMessage());
         }
         Test.stopTest();
 
-        // If Custom Metadata with class not implementing interface exists, exception should be thrown
+        System.assert(exceptionThrown, 'Expected TriggerFrameworkException for invalid interface');
+    }
+
+    @IsTest
+    static void shouldHandleRecursionLimit() {
+        // Arrange — inject a record with Max_Recursion__c = 1
+        Trigger_Action__mdt recursionAction = buildAction(
+            'TestRecursionAction', 'Account', 'BEFORE_INSERT', 10, true, 1
+        );
+        injectCache(recursionAction);
+
+        TriggerContext ctx = buildAccountContext(System.TriggerOperation.BEFORE_INSERT);
+
+        // Act — execute twice; recursion guard should block the second run
+        Test.startTest();
+        TriggerRecursionGuard.reset();
+        TestRecursionAction.executionCount = 0;
+
+        TriggerActionExecutor.execute(ctx, 'Account'); // 1st — should run
+        TriggerActionExecutor.execute(ctx, 'Account'); // 2nd — should be blocked
+        Test.stopTest();
+
+        // Assert
+        System.assertEquals(1, TestRecursionAction.executionCount,
+            'Action should only execute once when Max_Recursion__c = 1');
+    }
+
+    @IsTest
+    static void shouldAllowUnlimitedRecursionWhenMaxIsNull() {
+        // Arrange — inject a record with no Max_Recursion__c (null = unlimited)
+        Trigger_Action__mdt unlimitedAction = buildAction(
+            'TestRecursionAction', 'Account', 'BEFORE_INSERT', 10, true, null
+        );
+        injectCache(unlimitedAction);
+
+        TriggerContext ctx = buildAccountContext(System.TriggerOperation.BEFORE_INSERT);
+
+        // Act — execute three times; all should run
+        Test.startTest();
+        TriggerRecursionGuard.reset();
+        TestRecursionAction.executionCount = 0;
+
+        TriggerActionExecutor.execute(ctx, 'Account');
+        TriggerActionExecutor.execute(ctx, 'Account');
+        TriggerActionExecutor.execute(ctx, 'Account');
+        Test.stopTest();
+
+        // Assert
+        System.assertEquals(3, TestRecursionAction.executionCount,
+            'Action should execute every time when Max_Recursion__c is null');
+    }
+
+    @IsTest
+    static void shouldExecuteAsyncActions() {
+        // Arrange — inject an async action for a context that has newMap (required for enqueue)
+        Trigger_Action__mdt asyncAction = buildAction(
+            'TestAsyncAction', 'Account', 'AFTER_INSERT', 10, true, null
+        );
+        injectCache(asyncAction);
+
+        TriggerContext ctx = buildAccountContext(System.TriggerOperation.AFTER_INSERT);
+
+        // Act
+        Test.startTest();
+        TriggerRecursionGuard.reset();
+        TriggerActionExecutor.execute(ctx, 'Account');
+        Test.stopTest();
+
+        // Assert — if no exception, async job was enqueued and completed
+        System.assert(true, 'Async action enqueued and executed without error');
+    }
+
+    @IsTest
+    static void shouldSkipAsyncEnqueueInDeleteContext() {
+        // Arrange — async action in a delete context (newMap is null, so enqueue is skipped)
+        Trigger_Action__mdt asyncAction = buildAction(
+            'TestAsyncAction', 'Account', 'AFTER_DELETE', 10, true, null
+        );
+        injectCache(asyncAction);
+
+        TriggerContext ctx = buildAccountContext(System.TriggerOperation.AFTER_DELETE);
+
+        // Act — should not throw even though action implements IAsyncTriggerAction
+        Test.startTest();
+        TriggerRecursionGuard.reset();
+        TriggerActionExecutor.execute(ctx, 'Account');
+        Test.stopTest();
+
+        System.assert(true, 'Async enqueue correctly skipped in delete context');
+    }
+
+    @IsTest
+    static void shouldGetActionsFromCache() {
+        // Arrange — inject a known action
+        Trigger_Action__mdt action = buildAction(
+            'TestRecursionAction', 'Account', 'BEFORE_INSERT', 10, true, null
+        );
+        injectCache(action);
+
+        // Act
+        Test.startTest();
+        List<Trigger_Action__mdt> results = TriggerActionExecutor.getActions('Account', 'BEFORE_INSERT');
+        List<Trigger_Action__mdt> empty   = TriggerActionExecutor.getActions('Contact', 'BEFORE_INSERT');
+        Test.stopTest();
+
+        // Assert
+        System.assertEquals(1, results.size(), 'Should return the injected action');
+        System.assertEquals('TestRecursionAction', results[0].Class_Name__c);
+        System.assertEquals(0, empty.size(), 'Should return empty list for unregistered SObject');
     }
 
     @IsTest
     static void shouldExecuteActionsInOrderByOrderField() {
-        // Arrange - Inject metadata records directly into the cache to avoid
-        // deploying Custom Metadata that could impact production logic.
+        // Arrange — inject two actions in sorted order (Order 5 before Order 50)
         TriggerActionExecutor.clearCache();
         TestOrderActionFirst.executionLog.clear();
 
-        Trigger_Action__mdt actionOrder50 = new Trigger_Action__mdt(
-            Label = 'TestOrderActionFirst',
-            DeveloperName = 'TestOrderActionFirst',
-            Class_Name__c = 'TestOrderActionFirst',
-            SObject__c = 'Account',
-            Context__c = 'BEFORE_UPDATE',
-            Order__c = 50,
-            Active__c = true
+        Trigger_Action__mdt actionOrder50 = buildAction(
+            'TestOrderActionFirst', 'Account', 'BEFORE_UPDATE', 50, true, null
         );
-        Trigger_Action__mdt actionOrder5 = new Trigger_Action__mdt(
-            Label = 'TestOrderActionSecond',
-            DeveloperName = 'TestOrderActionSecond',
-            Class_Name__c = 'TestOrderActionSecond',
-            SObject__c = 'Account',
-            Context__c = 'BEFORE_UPDATE',
-            Order__c = 5,
-            Active__c = true
+        Trigger_Action__mdt actionOrder5 = buildAction(
+            'TestOrderActionSecond', 'Account', 'BEFORE_UPDATE', 5, true, null
         );
 
-        // Build the cache with records already sorted by Order__c ascending
-        // (simulating what loadCache + sortByOrder would produce)
         TriggerActionExecutor.actionCache = new Map<String, List<Trigger_Action__mdt>>{
             'Account_BEFORE_UPDATE' => new List<Trigger_Action__mdt>{ actionOrder5, actionOrder50 }
         };
         TriggerActionExecutor.cacheLoaded = true;
 
-        Account testAccount = new Account(
-            Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test Order'
-        );
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
-
-        TriggerContext ctx = new TriggerContext(
-            System.TriggerOperation.BEFORE_UPDATE,
-            newList,
-            newMap,
-            newList,
-            newMap
-        );
+        TriggerContext ctx = buildAccountContext(System.TriggerOperation.BEFORE_UPDATE);
 
         // Act
         Test.startTest();
+        TriggerRecursionGuard.reset();
         TriggerActionExecutor.execute(ctx, 'Account');
         Test.stopTest();
 
-        // Assert - Order 5 (Second) executes before Order 50 (First)
+        // Assert — Order 5 (Second) runs before Order 50 (First)
         System.assertEquals(2, TestOrderActionFirst.executionLog.size(),
             'Both order test actions should have executed');
         System.assertEquals('Second', TestOrderActionFirst.executionLog[0],
@@ -357,22 +284,12 @@ private class TriggerActionExecutorTest {
 
     @IsTest
     static void shouldSortActionsByOrderAscendingNullsLast() {
-        // Arrange - Build records in deliberately wrong order to verify sort
-        Trigger_Action__mdt orderNull = new Trigger_Action__mdt(
-            DeveloperName = 'NullOrder', Order__c = null
-        );
-        Trigger_Action__mdt order20 = new Trigger_Action__mdt(
-            DeveloperName = 'Order20', Order__c = 20
-        );
-        Trigger_Action__mdt order5 = new Trigger_Action__mdt(
-            DeveloperName = 'Order5', Order__c = 5
-        );
-        Trigger_Action__mdt order5Dup = new Trigger_Action__mdt(
-            DeveloperName = 'Order5Dup', Order__c = 5
-        );
-        Trigger_Action__mdt orderNull2 = new Trigger_Action__mdt(
-            DeveloperName = 'NullOrder2', Order__c = null
-        );
+        // Arrange — records in deliberately wrong order
+        Trigger_Action__mdt orderNull  = new Trigger_Action__mdt(DeveloperName = 'NullOrder',  Order__c = null);
+        Trigger_Action__mdt order20    = new Trigger_Action__mdt(DeveloperName = 'Order20',    Order__c = 20);
+        Trigger_Action__mdt order5     = new Trigger_Action__mdt(DeveloperName = 'Order5',     Order__c = 5);
+        Trigger_Action__mdt order5Dup  = new Trigger_Action__mdt(DeveloperName = 'Order5Dup',  Order__c = 5);
+        Trigger_Action__mdt orderNull2 = new Trigger_Action__mdt(DeveloperName = 'NullOrder2', Order__c = null);
 
         List<Trigger_Action__mdt> actions = new List<Trigger_Action__mdt>{
             orderNull, order20, order5, order5Dup, orderNull2
@@ -383,16 +300,11 @@ private class TriggerActionExecutorTest {
         TriggerActionExecutor.sortByOrder(actions);
         Test.stopTest();
 
-        // Assert - Should be sorted ascending with nulls last
-        System.assertEquals('Order5', actions[0].DeveloperName,
-            'First element should be Order 5');
-        System.assertEquals('Order5Dup', actions[1].DeveloperName,
-            'Second element should be Order 5 (duplicate, stable relative order)');
-        System.assertEquals('Order20', actions[2].DeveloperName,
-            'Third element should be Order 20');
-        System.assertEquals('NullOrder', actions[3].DeveloperName,
-            'Fourth element should be null order');
-        System.assertEquals('NullOrder2', actions[4].DeveloperName,
-            'Fifth element should be null order');
+        // Assert — ascending with nulls last, stable for equal values
+        System.assertEquals('Order5',     actions[0].DeveloperName, 'First should be Order 5');
+        System.assertEquals('Order5Dup',  actions[1].DeveloperName, 'Second should be Order 5 (dup)');
+        System.assertEquals('Order20',    actions[2].DeveloperName, 'Third should be Order 20');
+        System.assertEquals('NullOrder',  actions[3].DeveloperName, 'Fourth should be null');
+        System.assertEquals('NullOrder2', actions[4].DeveloperName, 'Fifth should be null');
     }
 }

@@ -1,23 +1,50 @@
 /**
  * Tests for TriggerDispatcher class.
+ * All tests inject an empty cache so no deployed Custom Metadata records
+ * interfere with execution.
  */
 @IsTest
 private class TriggerDispatcherTest {
 
+    /**
+     * Injects an empty action cache so dispatching never hits real metadata.
+     */
+    private static void injectEmptyCache() {
+        TriggerActionExecutor.clearCache();
+        TriggerActionExecutor.actionCache = new Map<String, List<Trigger_Action__mdt>>();
+        TriggerActionExecutor.cacheLoaded = true;
+    }
+
+    /**
+     * Builds a TriggerContext for Account with the given operation type.
+     */
+    private static TriggerContext buildAccountContext(System.TriggerOperation op) {
+        Account testAccount = new Account(
+            Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test'
+        );
+        List<Account> records = new List<Account>{ testAccount };
+        Map<Id, Account> recordMap = new Map<Id, Account>{ testAccount.Id => testAccount };
+
+        Boolean isDelete = (op == System.TriggerOperation.BEFORE_DELETE ||
+                            op == System.TriggerOperation.AFTER_DELETE);
+        Boolean isInsertOrUndelete = (op == System.TriggerOperation.BEFORE_INSERT ||
+                                      op == System.TriggerOperation.AFTER_INSERT ||
+                                      op == System.TriggerOperation.AFTER_UNDELETE);
+
+        return new TriggerContext(
+            op,
+            isDelete ? null : records,
+            isDelete ? null : recordMap,
+            isInsertOrUndelete ? null : records,
+            isInsertOrUndelete ? null : recordMap
+        );
+    }
+
     @IsTest
     static void shouldDispatchWithTriggerContext() {
         // Arrange
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test');
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
-
-        TriggerContext ctx = new TriggerContext(
-            System.TriggerOperation.BEFORE_INSERT,
-            newList,
-            newMap,
-            null,
-            null
-        );
+        injectEmptyCache();
+        TriggerContext ctx = buildAccountContext(System.TriggerOperation.BEFORE_INSERT);
 
         // Act
         Test.startTest();
@@ -30,94 +57,16 @@ private class TriggerDispatcherTest {
 
     @IsTest
     static void shouldDispatchAllTriggerOperations() {
-        // Arrange
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test');
-        List<Account> newList = new List<Account>{ testAccount };
-        Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
+        // Arrange — inject empty cache so no real metadata fires
+        injectEmptyCache();
 
-        // Act & Assert
+        // Act & Assert — every trigger operation dispatches without error
         Test.startTest();
 
-        // BEFORE contexts
-        TriggerContext beforeInsert = new TriggerContext(
-            System.TriggerOperation.BEFORE_INSERT,
-            newList,
-            newMap,
-            null,
-            null
-        );
-        TriggerDispatcher.dispatch('Account', beforeInsert);
-
-        TriggerContext beforeUpdate = new TriggerContext(
-            System.TriggerOperation.BEFORE_UPDATE,
-            newList,
-            newMap,
-            newList,
-            newMap
-        );
-        TriggerDispatcher.dispatch('Account', beforeUpdate);
-
-        TriggerContext beforeDelete = new TriggerContext(
-            System.TriggerOperation.BEFORE_DELETE,
-            null,
-            null,
-            newList,
-            newMap
-        );
-        TriggerDispatcher.dispatch('Account', beforeDelete);
-
-        // AFTER contexts
-        TriggerContext afterInsert = new TriggerContext(
-            System.TriggerOperation.AFTER_INSERT,
-            newList,
-            newMap,
-            null,
-            null
-        );
-        TriggerDispatcher.dispatch('Account', afterInsert);
-
-        // AFTER_UPDATE context may have Custom Metadata with invalid class name
-        // Handle exception if it exists
-        TriggerContext afterUpdate = new TriggerContext(
-            System.TriggerOperation.AFTER_UPDATE,
-            newList,
-            newMap,
-            newList,
-            newMap
-        );
-        try {
-            TriggerDispatcher.dispatch('Account', afterUpdate);
-        } catch (TriggerFrameworkException e) {
-            // Expected if TestInvalidClassName Custom Metadata exists with AFTER_UPDATE
-            System.assert(e.getMessage().contains('not found'), 
-                'Exception should be for class not found');
+        for (System.TriggerOperation op : System.TriggerOperation.values()) {
+            TriggerContext ctx = buildAccountContext(op);
+            TriggerDispatcher.dispatch('Account', ctx);
         }
-
-        // AFTER_DELETE context may have Custom Metadata with class not implementing interface
-        // Handle exception if it exists
-        TriggerContext afterDelete = new TriggerContext(
-            System.TriggerOperation.AFTER_DELETE,
-            null,
-            null,
-            newList,
-            newMap
-        );
-        try {
-            TriggerDispatcher.dispatch('Account', afterDelete);
-        } catch (TriggerFrameworkException e) {
-            // Expected if TestInvalidInterface Custom Metadata exists with AFTER_DELETE
-            System.assert(e.getMessage().contains('does not implement ITriggerAction'), 
-                'Exception should be for interface not implemented');
-        }
-
-        TriggerContext afterUndelete = new TriggerContext(
-            System.TriggerOperation.AFTER_UNDELETE,
-            newList,
-            newMap,
-            null,
-            null
-        );
-        TriggerDispatcher.dispatch('Account', afterUndelete);
 
         Test.stopTest();
 
@@ -127,20 +76,20 @@ private class TriggerDispatcherTest {
 
     @IsTest
     static void shouldDispatchFromActualTrigger() {
-        // This test calls the public dispatch(String) method which creates its own TriggerContext
-        // Note: We can't actually invoke trigger context outside of a trigger, 
-        // so we test that the method signature exists and is callable
-        
-        // Act & Assert
+        // The public dispatch(String) method creates its own TriggerContext.
+        // Outside a trigger context this should throw because Trigger.operationType is null.
+        injectEmptyCache();
+
         Test.startTest();
+        Boolean exceptionThrown = false;
         try {
-            // This will fail because we're not in a trigger context, but it proves the method is callable
             TriggerDispatcher.dispatch('Account');
-            System.assert(false, 'Expected exception when not in trigger context');
         } catch (Exception e) {
-            // Expected - we're not in a trigger context
-            System.assert(true, 'Correctly threw exception when not in trigger context');
+            exceptionThrown = true;
         }
         Test.stopTest();
+
+        System.assert(exceptionThrown,
+            'Expected exception when calling dispatch outside of a trigger context');
     }
 }
