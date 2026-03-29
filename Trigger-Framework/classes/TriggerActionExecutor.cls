@@ -83,8 +83,8 @@ public class TriggerActionExecutor {
         }
         
         // Sort each group by Order__c ascending, nulls last
-        for (List<Trigger_Action__mdt> group : actionCache.values()) {
-            sortByOrder(group);
+        for (List<Trigger_Action__mdt> actionGroup : actionCache.values()) {
+            sortByOrder(actionGroup);
         }
 
         cacheLoaded = true;
