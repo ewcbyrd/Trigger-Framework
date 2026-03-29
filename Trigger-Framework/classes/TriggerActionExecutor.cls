@@ -7,7 +7,9 @@ public class TriggerActionExecutor {
     private static final String CONTEXT_SEPARATOR = '_';
     
     // Cache to store all metadata records, loaded once per transaction
+    @TestVisible
     private static Map<String, List<Trigger_Action__mdt>> actionCache;
+    @TestVisible
     private static Boolean cacheLoaded = false;
 
     /**
@@ -92,6 +94,7 @@ public class TriggerActionExecutor {
      * Sorts a list of Trigger_Action__mdt records by Order__c ascending with nulls last.
      * Uses a simple insertion sort since action lists are typically small.
      */
+    @TestVisible
     private static void sortByOrder(List<Trigger_Action__mdt> actions) {
         for (Integer i = 1; i < actions.size(); i++) {
             Trigger_Action__mdt current = actions[i];

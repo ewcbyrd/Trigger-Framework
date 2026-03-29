@@ -296,11 +296,40 @@ private class TriggerActionExecutorTest {
 
     @IsTest
     static void shouldExecuteActionsInOrderByOrderField() {
-        // Arrange - Clear cache and execution log for clean state
+        // Arrange - Inject metadata records directly into the cache to avoid
+        // deploying Custom Metadata that could impact production logic.
         TriggerActionExecutor.clearCache();
         TestOrderActionFirst.executionLog.clear();
 
-        Account testAccount = new Account(Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test Order');
+        Trigger_Action__mdt actionOrder50 = new Trigger_Action__mdt(
+            Label = 'TestOrderActionFirst',
+            DeveloperName = 'TestOrderActionFirst',
+            Class_Name__c = 'TestOrderActionFirst',
+            SObject__c = 'Account',
+            Context__c = 'BEFORE_UPDATE',
+            Order__c = 50,
+            Active__c = true
+        );
+        Trigger_Action__mdt actionOrder5 = new Trigger_Action__mdt(
+            Label = 'TestOrderActionSecond',
+            DeveloperName = 'TestOrderActionSecond',
+            Class_Name__c = 'TestOrderActionSecond',
+            SObject__c = 'Account',
+            Context__c = 'BEFORE_UPDATE',
+            Order__c = 5,
+            Active__c = true
+        );
+
+        // Build the cache with records already sorted by Order__c ascending
+        // (simulating what loadCache + sortByOrder would produce)
+        TriggerActionExecutor.actionCache = new Map<String, List<Trigger_Action__mdt>>{
+            'Account_BEFORE_UPDATE' => new List<Trigger_Action__mdt>{ actionOrder5, actionOrder50 }
+        };
+        TriggerActionExecutor.cacheLoaded = true;
+
+        Account testAccount = new Account(
+            Id = TestUtility.generateFakeId(Account.SObjectType), Name = 'Test Order'
+        );
         List<Account> newList = new List<Account>{ testAccount };
         Map<Id, Account> newMap = new Map<Id, Account>{ testAccount.Id => testAccount };
 
@@ -312,18 +341,58 @@ private class TriggerActionExecutorTest {
             newMap
         );
 
-        // Act - Execute actions registered for Account BEFORE_UPDATE
-        // TestOrderActionSecond has Order__c = 5, TestOrderActionFirst has Order__c = 50
+        // Act
         Test.startTest();
         TriggerActionExecutor.execute(ctx, 'Account');
         Test.stopTest();
 
-        // Assert - Second (Order 5) should execute before First (Order 50)
+        // Assert - Order 5 (Second) executes before Order 50 (First)
         System.assertEquals(2, TestOrderActionFirst.executionLog.size(),
             'Both order test actions should have executed');
         System.assertEquals('Second', TestOrderActionFirst.executionLog[0],
             'Action with lower Order__c (5) should execute first');
         System.assertEquals('First', TestOrderActionFirst.executionLog[1],
             'Action with higher Order__c (50) should execute second');
+    }
+
+    @IsTest
+    static void shouldSortActionsByOrderAscendingNullsLast() {
+        // Arrange - Build records in deliberately wrong order to verify sort
+        Trigger_Action__mdt orderNull = new Trigger_Action__mdt(
+            DeveloperName = 'NullOrder', Order__c = null
+        );
+        Trigger_Action__mdt order20 = new Trigger_Action__mdt(
+            DeveloperName = 'Order20', Order__c = 20
+        );
+        Trigger_Action__mdt order5 = new Trigger_Action__mdt(
+            DeveloperName = 'Order5', Order__c = 5
+        );
+        Trigger_Action__mdt order5Dup = new Trigger_Action__mdt(
+            DeveloperName = 'Order5Dup', Order__c = 5
+        );
+        Trigger_Action__mdt orderNull2 = new Trigger_Action__mdt(
+            DeveloperName = 'NullOrder2', Order__c = null
+        );
+
+        List<Trigger_Action__mdt> actions = new List<Trigger_Action__mdt>{
+            orderNull, order20, order5, order5Dup, orderNull2
+        };
+
+        // Act
+        Test.startTest();
+        TriggerActionExecutor.sortByOrder(actions);
+        Test.stopTest();
+
+        // Assert - Should be sorted ascending with nulls last
+        System.assertEquals('Order5', actions[0].DeveloperName,
+            'First element should be Order 5');
+        System.assertEquals('Order5Dup', actions[1].DeveloperName,
+            'Second element should be Order 5 (duplicate, stable relative order)');
+        System.assertEquals('Order20', actions[2].DeveloperName,
+            'Third element should be Order 20');
+        System.assertEquals('NullOrder', actions[3].DeveloperName,
+            'Fourth element should be null order');
+        System.assertEquals('NullOrder2', actions[4].DeveloperName,
+            'Fifth element should be null order');
     }
 }
