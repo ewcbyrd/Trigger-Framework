@@ -42,6 +42,35 @@ This framework enables a clean, maintainable trigger architecture where:
 - Built-in recursion prevention and field change detection utilities
 - Testable with mock trigger context injection
 
+### Execution Flow
+
+```
+Trigger fires (e.g., AccountTrigger)
+  |
+  v
+TriggerDispatcher.dispatch('Account')
+  |-- Creates TriggerContext (wraps Trigger.* variables)
+  |
+  v
+TriggerActionExecutor.execute(ctx, 'Account')
+  |-- resolveContextName(AFTER_UPDATE) --> 'AFTER_UPDATE'
+  |-- loadCache() [once per transaction, uses getAll() -- 0 SOQL]
+  |-- getActions('Account', 'AFTER_UPDATE') --> cached metadata records
+  |
+  |-- For each active, ordered Trigger_Action__mdt record:
+  |     |-- canExecute(actionKey, maxRecursion)  [recursion check]
+  |     |-- createAction(className)              [Type.forName() reflection]
+  |     |-- track(actionKey)                     [increment count]
+  |     |-- action.execute(ctx)                  [synchronous, fail-fast]
+  |     |-- if instanceof IAsyncTriggerAction --> collect for later
+  |
+  v
+If async actions exist AND ctx.newMap != null:
+  System.enqueueJob(TriggerAsyncQueueable)
+    |-- For each async action:
+          action.executeAsync(recordIds)  [separate governor limits]
+```
+
 ## Quick Start
 
 ### 1. Create a Trigger
@@ -281,6 +310,8 @@ public class MyAsyncAction implements IAsyncTriggerAction {
 3. After all sync actions complete, framework enqueues `executeAsync()`
 4. Queueable job executes with fresh governor limits
 
+> **Note:** Async actions are only enqueued when `ctx.newMap` is not null. This means `executeAsync()` will **not** run in `BEFORE_DELETE` or `AFTER_DELETE` contexts, since there are no "new" records. The synchronous `execute()` method still runs in delete contexts. If you need async processing for deleted records, handle it manually within `execute()`.
+
 ---
 
 ### Core Classes
@@ -295,12 +326,19 @@ public class MyAsyncAction implements IAsyncTriggerAction {
 
 ```apex
 public static void dispatch(String sObjectName)
-public static void dispatch(String sObjectName, TriggerContext ctx)
 ```
 
 **Parameters:**
 - `sObjectName` - API name of the SObject (e.g., 'Account', 'CustomObject__c')
-- `ctx` - Optional: Mock TriggerContext for testing
+
+**Test-Only Overload (`@TestVisible private`):**
+
+```apex
+@TestVisible
+private static void dispatch(String sObjectName, TriggerContext ctx)
+```
+
+- `ctx` - Mock TriggerContext for testing (only accessible from `@IsTest` classes)
 
 **Usage in Trigger:**
 ```apex
@@ -322,6 +360,8 @@ TriggerContext mockCtx = new TriggerContext(
 TriggerDispatcher.dispatch('Account', mockCtx);
 ```
 
+> **Note:** Both the test constructor on `TriggerContext` and the test overload on `TriggerDispatcher` are `private` with `@TestVisible`. They are only accessible from `@IsTest` classes.
+
 **Behavior:**
 - Automatically detects trigger context (before/after, insert/update/delete/undelete)
 - Creates TriggerContext wrapper from Trigger.* variables
@@ -339,12 +379,12 @@ TriggerDispatcher.dispatch('Account', mockCtx);
 **Methods:**
 
 ```apex
-public static void execute(String sObjectName, TriggerContext ctx)
+public static void execute(TriggerContext ctx, String sObjectName)
 ```
 
 **Parameters:**
-- `sObjectName` - API name of the SObject
 - `ctx` - TriggerContext containing trigger data
+- `sObjectName` - API name of the SObject
 
 **Internal Process:**
 1. Loads ALL `Trigger_Action__mdt` records via `getAll()` on first execution (no SOQL)
@@ -424,32 +464,42 @@ update account;  // Loads cache via getAll(), action modifies related records
 **Properties:**
 
 ```apex
-public List<SObject> newList          // Trigger.new
-public List<SObject> oldList          // Trigger.old
-public Map<Id, SObject> newMap        // Trigger.newMap
-public Map<Id, SObject> oldMap        // Trigger.oldMap
 public System.TriggerOperation operationType  // Trigger.operationType
-public String context                 // String version (e.g., 'AFTER_UPDATE')
-public Integer size                   // Trigger.size
-public Boolean isBefore               // Trigger.isBefore
-public Boolean isAfter                // Trigger.isAfter
-public Boolean isInsert               // Trigger.isInsert
-public Boolean isUpdate               // Trigger.isUpdate
-public Boolean isDelete               // Trigger.isDelete
-public Boolean isUndelete             // Trigger.isUndelete
+public List<SObject> newList                  // Trigger.new
+public Map<Id, SObject> newMap                // Trigger.newMap
+public List<SObject> oldList                  // Trigger.old
+public Map<Id, SObject> oldMap                // Trigger.oldMap
+public Boolean isBefore                       // Trigger.isBefore
+public Boolean isAfter                        // Trigger.isAfter
+public Boolean isInsert                       // Trigger.isInsert
+public Boolean isUpdate                       // Trigger.isUpdate
+public Boolean isDelete                       // Trigger.isDelete
+public Boolean isUndelete                     // Trigger.isUndelete
+public Integer size                           // Trigger.size
 ```
 
-**Constructor:**
+All properties have `public` getters and `private` setters.
 
+**Constructors:**
+
+**Production (public, no-arg):**
 ```apex
-public TriggerContext(
+public TriggerContext()
+```
+Reads all values directly from `Trigger.*` system context variables.
+
+**Test (`@TestVisible private`):**
+```apex
+@TestVisible
+private TriggerContext(
     System.TriggerOperation operationType,
     List<SObject> newList,
-    List<SObject> oldList,
     Map<Id, SObject> newMap,
+    List<SObject> oldList,
     Map<Id, SObject> oldMap
 )
 ```
+Derives boolean flags (`isBefore`, `isAfter`, etc.) from the `operationType` enum name. Only accessible from `@IsTest` classes.
 
 **Methods:**
 
@@ -615,49 +665,42 @@ ctx.getChangedRecordsAll(fields);
 
 #### TriggerRecursionGuard
 
-**Purpose:** Prevents infinite recursion by tracking action execution counts per context.
+**Purpose:** Prevents infinite recursion by tracking action execution counts using a composite key per action per context.
 
 **Location:** `classes/TriggerRecursionGuard.cls`
 
 **Methods:**
 
 ```apex
-public static Boolean shouldExecute(
-    String className, 
-    String context, 
-    Integer maxRecursion
-)
-
-public static void increment(String className, String context)
-
-public static Integer getCount(String className, String context)
-
-public static void reset()
-```
-
-**Usage Pattern (internal to framework):**
-```apex
-if (TriggerRecursionGuard.shouldExecute('AccountValidation', 'AFTER_UPDATE', 1)) {
-    // Execute action
-    TriggerRecursionGuard.increment('AccountValidation', 'AFTER_UPDATE');
-}
+public static Boolean canExecute(String actionKey, Integer maxRecursion)
+public static void track(String actionKey)
 ```
 
 **Parameters:**
-- `className` - Name of the action class
-- `context` - Trigger context string (e.g., 'AFTER_UPDATE')
-- `maxRecursion` - Maximum allowed executions (null or 0 = unlimited)
+- `actionKey` - Composite key: `className + '_' + contextName` (e.g., `'AccountValidation_AFTER_UPDATE'`)
+- `maxRecursion` - Maximum allowed executions. `null` or `0` = unlimited.
 
-**Returns:** `true` if action should execute, `false` if limit reached
+**Returns (`canExecute`):** `true` if action is allowed to execute, `false` if limit reached
+
+**Usage Pattern (internal to framework):**
+```apex
+String actionKey = 'AccountValidation' + '_' + 'AFTER_UPDATE';
+
+if (TriggerRecursionGuard.canExecute(actionKey, 1)) {
+    TriggerRecursionGuard.track(actionKey);
+    // Execute action
+}
+```
 
 **Static State:**
-- Uses `static Map<String, Map<String, Integer>>` to track counts
+- Uses `static Map<String, Integer>` to track counts (flat map with composite keys)
 - Persists for entire transaction
 - Automatically reset between transactions
 
-**Debug Output:**
+**Test Support:**
 ```apex
-System.debug('Recursion limit reached for action: AccountValidation in context: AFTER_UPDATE');
+// @TestVisible private method for resetting state between test methods
+TriggerRecursionGuard.reset();
 ```
 
 **Not Typically Called Directly:** Framework handles recursion checking automatically.
@@ -691,25 +734,20 @@ public void execute(QueueableContext context)
 
 **Behavior:**
 1. Executes each async action's `executeAsync(recordIds)` method sequentially
-2. Catches and logs exceptions per action (doesn't halt execution)
+2. Exceptions propagate naturally (fail-fast) -- if one async action throws, subsequent actions do not execute
 3. Runs with fresh governor limits (separate from trigger transaction)
 
 **Error Handling:**
-```apex
-try {
-    action.executeAsync(this.recordIds);
-} catch (Exception e) {
-    System.debug('Error in async action: ' + e.getMessage());
-    // Continues to next action
-}
-```
+- No try/catch -- exceptions propagate up from the Queueable execution
+- A failing async action will cause the Queueable job to fail (visible in Setup > Apex Jobs)
+- If you need per-action error isolation, add try/catch inside your `executeAsync()` implementation
 
 **Governor Limits:**
 - Queueable: 50 chained jobs per transaction
 - Async apex limits apply (not trigger limits)
 - SOQL: 100 queries
 - DML: 150 statements
-- Heap: 6 MB (12 MB async)
+- Heap: 12 MB (async context)
 
 **Not Typically Instantiated Directly:** Framework enqueues automatically when `IAsyncTriggerAction` actions are registered.
 
@@ -746,23 +784,21 @@ throw new TriggerFrameworkException('Action class not found: ' + className);
 **Methods:**
 
 ```apex
-public static Id getFakeId(Schema.SObjectType sObjectType)
-public static Id getFakeId(Schema.SObjectType sObjectType, Integer counter)
+public static Id generateFakeId(Schema.SObjectType sObjectType)
 ```
 
 **Parameters:**
 - `sObjectType` - SObject type (e.g., Account.SObjectType)
-- `counter` - Optional: Specific counter for the ID (default: auto-increments)
 
-**Returns:** Valid 18-character Salesforce ID
+**Returns:** Valid 18-character Salesforce ID (auto-increments internally to guarantee uniqueness)
 
 **Usage:**
 ```apex
 @IsTest
 static void testAction() {
     // Generate fake IDs for testing
-    Id fakeAccountId = TestUtility.getFakeId(Account.SObjectType);
-    Id fakeContactId = TestUtility.getFakeId(Contact.SObjectType);
+    Id fakeAccountId = TestUtility.generateFakeId(Account.SObjectType);
+    Id fakeContactId = TestUtility.generateFakeId(Contact.SObjectType);
     
     Account oldAccount = new Account(
         Id = fakeAccountId,
@@ -778,8 +814,8 @@ static void testAction() {
     TriggerContext ctx = new TriggerContext(
         System.TriggerOperation.AFTER_UPDATE,
         new List<Account>{ newAccount },
-        new List<Account>{ oldAccount },
         new Map<Id, SObject>{ fakeAccountId => newAccount },
+        new List<Account>{ oldAccount },
         new Map<Id, SObject>{ fakeAccountId => oldAccount }
     );
     
@@ -806,16 +842,16 @@ static void testAction() {
 
 **Fields:**
 
-| Field API Name | Type | Description | Required | Default |
-|----------------|------|-------------|----------|---------|
-| `Label` | Text(80) | User-friendly name for the action | Yes | - |
-| `SObject__c` | Text(255) | API name of the SObject (e.g., 'Account') | Yes | - |
-| `Context__c` | Text(50) | Trigger context (e.g., 'AFTER_UPDATE') | Yes | - |
-| `Class_Name__c` | Text(255) | Fully-qualified class name implementing ITriggerAction | Yes | - |
-| `Order__c` | Number(18,0) | Execution order (ascending, nulls last) | No | null |
-| `Active__c` | Checkbox | Whether action should execute | No | false |
-| `Max_Recursion__c` | Number(18,0) | Maximum times action can execute per transaction | No | 1 |
-| `Description__c` | Long Text Area | Business logic description | No | - |
+| Field API Name | Type | Length/Precision | Required | Default |
+|----------------|------|------------------|----------|---------|
+| `Label` | Text(80) | 80 | Yes | - |
+| `SObject__c` | Text(255) | 255 | Yes | - |
+| `Context__c` | Text(255) | 255 | Yes | - |
+| `Class_Name__c` | Text(255) | 255 | Yes | - |
+| `Order__c` | Number(5,1) | precision=5, scale=1 | No | null |
+| `Active__c` | Checkbox | - | No | `true` |
+| `Max_Recursion__c` | Number(2,0) | precision=2, scale=0 | No | null |
+| `Description__c` | Long Text Area(32768) | 32768 | No | - |
 
 **Valid Context Values:**
 - `BEFORE_INSERT`
@@ -829,7 +865,7 @@ static void testAction() {
 **Best Practices:**
 - Use descriptive labels: `{Object}_{Context}_{Description}`
 - Order in increments of 10: 10, 20, 30 (allows insertion)
-- Set `Max_Recursion__c = 1` unless you specifically need multiple executions
+- Set `Max_Recursion__c = 1` for most actions (no default value -- blank means unlimited)
 - Use `Description__c` to document business logic for maintainability
 - Set `Active__c = false` to temporarily disable without deleting
 
@@ -965,9 +1001,11 @@ Order 30:  SyncToExternalSystem (async)
 ## Recursion Prevention
 
 Each action can specify `Max_Recursion__c`:
-- `1` (default) - Execute once per transaction
-- `null` or `0` - No limit
+- `null` or `0` - No limit (unlimited executions)
+- `1` (recommended) - Execute once per transaction
 - `n` - Execute up to n times
+
+> **Important:** `Max_Recursion__c` has no default value at the field level. If left blank, the framework treats it as unlimited. Set it to `1` explicitly on each metadata record unless you specifically need multiple executions.
 
 ## Testing
 
@@ -1370,8 +1408,6 @@ Or use Custom Settings/Custom Permissions for more flexibility.
 
 ---
 
-## Testing
-
 ## Real-World Examples
 
 ### Example 1: Opportunity Stage Change Tracking
@@ -1517,7 +1553,7 @@ public class ContactSyncMailingAddress implements ITriggerAction {
 **Use Case:** Automatically assign qualified leads to the appropriate team based on their characteristics.
 
 **Logic:**
-- Trigger on: `AFTER_UPDATE` context on Lead
+- Trigger on: `BEFORE_UPDATE` context on Lead (before context allows direct field modification)
 - Filter: Complex boolean logic using custom conditions
   - `(Status changed to 'Qualified')` **AND** `(Industry changed OR AnnualRevenue changed)`
 - Action: Assign to different queues based on revenue and industry
@@ -1528,6 +1564,7 @@ public class ContactSyncMailingAddress implements ITriggerAction {
 **Key Methods Used:**
 - `ctx.hasChanged(record, field)` - Check individual field changes
 - Custom boolean logic combining multiple conditions with AND/OR operators
+- Direct field modification on trigger records (works in before context)
 - Example scenarios:
   - Status changes to Qualified AND Industry changes → Assigned
   - Status changes to Qualified AND Revenue changes → Assigned
@@ -1590,9 +1627,9 @@ public class LeadAutoAssignment implements ITriggerAction {
 **Custom Metadata Configuration:**
 | Field | Value |
 |-------|-------|
-| Label | `Lead_AfterUpdate_AutoAssignment` |
+| Label | `Lead_BeforeUpdate_AutoAssignment` |
 | SObject__c | `Lead` |
-| Context__c | `AFTER_UPDATE` |
+| Context__c | `BEFORE_UPDATE` |
 | Class_Name__c | `LeadAutoAssignment` |
 | Order__c | `10` |
 | Active__c | `true` |
@@ -1923,7 +1960,7 @@ public class AccountRestoreRelatedRecords implements ITriggerAction {
 |---------|---------|---------|----------|---------|
 | 1. Opportunity Stage Change | Opportunity | AFTER_UPDATE | Create renewal opportunities when deal closes | Single field change detection |
 | 2. Contact Address Sync | Account | AFTER_UPDATE | Sync contact addresses when account address changes | Multiple field change (OR) + related record update |
-| 3. Lead Auto Assignment | Lead | AFTER_UPDATE | Assign leads based on status and criteria | Complex AND/OR logic |
+| 3. Lead Auto Assignment | Lead | BEFORE_UPDATE | Assign leads based on status and criteria | Complex AND/OR logic |
 | 4. Case Escalation | Case | AFTER_UPDATE | Escalate and notify on priority increase | Custom comparison logic |
 | 5. Account Data Enrichment | Account | AFTER_INSERT | Enrich account data from external API | Async (IAsyncTriggerAction) |
 | 6. Prevent Account Delete | Account | BEFORE_DELETE | Block deletion with open opportunities | Before delete validation |
